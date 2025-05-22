@@ -1,53 +1,55 @@
+from flask import Flask
+from telegram import Update, Bot
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import threading
 import os
 import requests
-from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
-API_URL = "https://ticket-pdf-app.onrender.com/generate"
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")  # Обов'язково задається в Render як Environment Variable
+PDF_SERVER_URL = "https://ticket-pdf-app.onrender.com/generate"
 
-FIELDS = [
-    "Квиток №", "Номер замовлення", "№ Рейсу", "Рейс", "Час відправлення", "Дата відправлення",
-    "Час прибуття", "Дата прибуття", "Станція відправлення", "Станція прибуття",
-    "Місце", "Пасажир", "Ціна"
-]
+app = Flask(__name__)
 
-user_data = {}
+@app.route('/')
+def index():
+    return "✅ Telegram Bot is running"
 
 def start(update: Update, context: CallbackContext):
-    user_id = update.effective_chat.id
-    user_data[user_id] = {}
-    context.user_data['step'] = 0
-    update.message.reply_text(f"Введіть: {FIELDS[0]}")
+    update.message.reply_text("Привіт! Надішли мені дані для квитка у форматі:\n"
+                              "Квиток №\nНомер замовлення\n№ Рейсу\nРейс\nЧас відправлення\nДата відправлення\n"
+                              "Час прибуття\nДата прибуття\nСтанція відправлення\nСтанція прибуття\n"
+                              "Місце\nПасажир\nЦіна")
 
-def handle_input(update: Update, context: CallbackContext):
-    user_id = update.effective_chat.id
-    step = context.user_data.get('step', 0)
-    user_data[user_id][FIELDS[step]] = update.message.text
+def handle_message(update: Update, context: CallbackContext):
+    lines = update.message.text.strip().split('\n')
+    if len(lines) != 13:
+        update.message.reply_text("⚠️ Некоректний формат. Має бути 13 рядків.")
+        return
 
-    if step + 1 < len(FIELDS):
-        context.user_data['step'] = step + 1
-        update.message.reply_text(f"Введіть: {FIELDS[step + 1]}")
-    else:
-        update.message.reply_text("⏳ Генеруємо квиток, зачекайте...")
-        try:
-            response = requests.post(API_URL, json=user_data[user_id])
-            if response.status_code == 200:
-                with open("ticket.pdf", "wb") as f:
-                    f.write(response.content)
-                update.message.reply_document(document=InputFile("ticket.pdf"))
-            else:
-                update.message.reply_text("❌ Помилка генерації PDF.")
-        except Exception as e:
-            update.message.reply_text(f"⚠️ Сталася помилка: {e}")
+    fields = ["Квиток №", "Номер замовлення", "№ Рейсу", "Рейс", "Час відправлення", "Дата відправлення",
+              "Час прибуття", "Дата прибуття", "Станція відправлення", "Станція прибуття",
+              "Місце", "Пасажир", "Ціна"]
 
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
+    data = dict(zip(fields, lines))
+
+    try:
+        response = requests.post(PDF_SERVER_URL, json=data)
+        if response.status_code == 200:
+            pdf_bytes = response.content
+            update.message.reply_document(document=pdf_bytes, filename=f"ticket_{data['Квиток №']}.pdf")
+        else:
+            update.message.reply_text(f"❌ Помилка при генерації PDF: {response.status_code}")
+    except Exception as e:
+        update.message.reply_text(f"❌ Виняток: {e}")
+
+def run_bot():
+    updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_input))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
     updater.idle()
 
 if __name__ == '__main__':
-    main()
+    threading.Thread(target=run_bot).start()
+    app.run(host='0.0.0.0', port=10000)
