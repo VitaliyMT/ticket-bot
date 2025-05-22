@@ -1,60 +1,86 @@
 import os
-from flask import Flask, request
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
+import io
+import qrcode
+import tempfile
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-from PyPDF2 import PdfReader, PdfWriter
-import qrcode
-import io
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-app = Flask(__name__)
-bot = Bot(token=BOT_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
+pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
-PDF_HEIGHT_MM = 297
+# Фази діалогу
+(
+    TICKET_NUM, ORDER_NUM, TRIP_NUM, ROUTE, DEPART_TIME, DEPART_DATE,
+    ARR_TIME, ARR_DATE, FROM_ST, TO_ST, SEAT, PASSENGER, PRICE
+) = range(13)
 
+user_data = {}
 
-def draw_text_left(c, x_mm, y_mm_top_origin, text, size=10.8, bold=False):
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
-    pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
-    y_mm = PDF_HEIGHT_MM - y_mm_top_origin
-    x_pt = x_mm * mm
-    y_pt = y_mm * mm
-    font_name = "DejaVu-Bold" if bold else "DejaVu"
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont(font_name, size)
-    c.drawString(x_pt, y_pt - 1, text)
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("Введіть номер квитка:")
+    return TICKET_NUM
 
+def ask_next(update: Update, context: CallbackContext, key, next_state, prompt):
+    user_data[key] = update.message.text.strip()
+    update.message.reply_text(prompt)
+    return next_state
 
-def draw_centered_text(c, x_mm, y_mm_top_origin, text, size=10.8, bold=False):
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
-    pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
-    y_mm = PDF_HEIGHT_MM - y_mm_top_origin
-    x_pt = x_mm * mm
-    y_pt = y_mm * mm
-    font_name = "DejaVu-Bold" if bold else "DejaVu"
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont(font_name, size)
-    text_width = c.stringWidth(text, font_name, size)
-    c.drawString(x_pt - text_width / 2, y_pt - 1, text)
+def ask_order_num(update, context): return ask_next(update, context, "Квиток №", ORDER_NUM, "Введіть номер замовлення:")
+def ask_trip_num(update, context): return ask_next(update, context, "Номер замовлення", TRIP_NUM, "Введіть № рейсу:")
+def ask_route(update, context): return ask_next(update, context, "№ Рейсу", ROUTE, "Введіть найменування рейсу:")
+def ask_depart_time(update, context): return ask_next(update, context, "Рейс", DEPART_TIME, "Введіть час відправлення:")
+def ask_depart_date(update, context): return ask_next(update, context, "Час відправлення", DEPART_DATE, "Введіть дату відправлення:")
+def ask_arr_time(update, context): return ask_next(update, context, "Дата відправлення", ARR_TIME, "Введіть час прибуття:")
+def ask_arr_date(update, context): return ask_next(update, context, "Час прибуття", ARR_DATE, "Введіть дату прибуття:")
+def ask_from_st(update, context): return ask_next(update, context, "Дата прибуття", FROM_ST, "Введіть станцію відправлення:")
+def ask_to_st(update, context): return ask_next(update, context, "Станція відправлення", TO_ST, "Введіть станцію прибуття:")
+def ask_seat(update, context): return ask_next(update, context, "Станція прибуття", SEAT, "Введіть № місця:")
+def ask_passenger(update, context): return ask_next(update, context, "Місце", PASSENGER, "Введіть ім’я пасажира:")
+def ask_price(update, context): return ask_next(update, context, "Пасажир", PRICE, "Введіть ціну квитка:")
 
+def generate_and_send(update: Update, context: CallbackContext):
+    user_data["Ціна"] = update.message.text.strip()
+
+    ticket_number = user_data["Квиток №"]
+    template_path = "приклад.pdf"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp_path = tmp.name
+    tmp.close()
+
+    generate_ticket(user_data, template_path, tmp_path)
+
+    with open(tmp_path, "rb") as f:
+        update.message.reply_document(f, filename=f"ticket_{ticket_number}.pdf")
+
+    os.remove(tmp_path)
+    return ConversationHandler.END
 
 def generate_ticket(data, template_path, output_path):
-    overlay_path = "_overlay_temp.pdf"
+    PDF_HEIGHT_MM = 297
+    overlay_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
     c = canvas.Canvas(overlay_path, pagesize=A4)
 
-    # Очистка шаблонних крапок
-    c.setFillColorRGB(1, 1, 1)
-    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
-    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
+    def draw_centered_text(x_mm, y_mm, text, bold=False):
+        y_pt = (PDF_HEIGHT_MM - y_mm) * mm
+        x_pt = x_mm * mm
+        font = "DejaVu-Bold" if bold else "DejaVu"
+        c.setFont(font, 10.8)
+        width = c.stringWidth(text, font, 10.8)
+        c.drawString(x_pt - width / 2, y_pt - 1, text)
+
+    def draw_left_text(x_mm, y_mm, text, bold=False):
+        y_pt = (PDF_HEIGHT_MM - y_mm) * mm
+        x_pt = x_mm * mm
+        font = "DejaVu-Bold" if bold else "DejaVu"
+        c.setFont(font, 10.8)
+        c.drawString(x_pt, y_pt - 1, text)
 
     coords = {
         "№ Рейсу": (53.75, 50.81, True),
@@ -65,28 +91,30 @@ def generate_ticket(data, template_path, output_path):
         "Дата відправлення": (157.22, 55.89, False),
         "Час прибуття": (186.63, 49.75, True),
         "Дата прибуття": (186.42, 55.47, False),
-        "Ціна": (177.32, 87.79, True),
-        "Місце": (97.55, 86.38, True)
+        "Ціна": (177.32, 88.52, True),
+        "Місце": (97.55, 86.38, True),
     }
 
     for key, (x, y, bold) in coords.items():
-        draw_centered_text(c, x, y, data[key], size=10.8, bold=bold)
+        draw_centered_text(x, y, data[key], bold=bold)
 
-    draw_text_left(c, 13.25, 86.8, data["Пасажир"], size=10.8, bold=True)
-    draw_text_left(c, 59, 13.25, data["Номер замовлення"], size=10.8, bold=True)
-    draw_text_left(c, 105, 38.03, data["Квиток №"], size=10.8, bold=True)
+    draw_left_text(13.25, 86.8, data["Пасажир"], bold=True)
+    draw_left_text(59.70, 13.66, data["Номер замовлення"], bold=True)
+    draw_left_text(105.70, 38.83, data["Квиток №"], bold=True)
 
-    qr = qrcode.QRCode(version=1, box_size=5, border=1)
-    qr.add_data(data["Квиток №"])
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    qr = qrcode.make(data["Квиток №"])
     buf = io.BytesIO()
-    img.save(buf)
+    qr.save(buf)
     buf.seek(0)
     qr_img = ImageReader(buf)
-    qr_x_pt = 27.72 * mm - 15 * mm
-    qr_y_pt = (PDF_HEIGHT_MM - 54.2) * mm - 15 * mm
-    c.drawImage(qr_img, qr_x_pt, qr_y_pt, 30 * mm, 30 * mm)
+    qr_x = 27.72 * mm - 15 * mm
+    qr_y = (PDF_HEIGHT_MM - 54.2) * mm - 15 * mm
+    c.drawImage(qr_img, qr_x, qr_y, 30 * mm, 30 * mm)
+
+    # замазуємо 2 крапки в шаблоні
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
+    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
 
     c.save()
 
@@ -98,66 +126,38 @@ def generate_ticket(data, template_path, output_path):
     writer.add_page(page)
     with open(output_path, "wb") as f:
         writer.write(f)
+    os.remove(overlay_path)
 
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("Скасовано.")
+    return ConversationHandler.END
 
-# === Telegram Bot Handlers ===
-def start(update, context):
-    update.message.reply_text("Введіть номер квитка:")
-    context.user_data["step"] = "ticket_id"
+# --- Запуск бота ---
+TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН"
+updater = Updater(token=TOKEN, use_context=True)
+dp = updater.dispatcher
 
+conv = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    states={
+        TICKET_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_order_num)],
+        ORDER_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_trip_num)],
+        TRIP_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_route)],
+        ROUTE: [MessageHandler(Filters.text & ~Filters.command, ask_depart_time)],
+        DEPART_TIME: [MessageHandler(Filters.text & ~Filters.command, ask_depart_date)],
+        DEPART_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_arr_time)],
+        ARR_TIME: [MessageHandler(Filters.text & ~Filters.command, ask_arr_date)],
+        ARR_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_from_st)],
+        FROM_ST: [MessageHandler(Filters.text & ~Filters.command, ask_to_st)],
+        TO_ST: [MessageHandler(Filters.text & ~Filters.command, ask_seat)],
+        SEAT: [MessageHandler(Filters.text & ~Filters.command, ask_passenger)],
+        PASSENGER: [MessageHandler(Filters.text & ~Filters.command, ask_price)],
+        PRICE: [MessageHandler(Filters.text & ~Filters.command, generate_and_send)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)]
+)
 
-def handle_message(update, context):
-    step = context.user_data.get("step")
-    text = update.message.text
+dp.add_handler(conv)
 
-    if step == "ticket_id":
-        context.user_data["Квиток №"] = text
-        update.message.reply_text("Введіть номер замовлення:")
-        context.user_data["step"] = "order_id"
-
-    elif step == "order_id":
-        context.user_data["Номер замовлення"] = text
-        update.message.reply_text("Введіть № Рейсу:")
-        context.user_data["step"] = "№ Рейсу"
-
-    elif step in ["№ Рейсу", "Рейс", "Час відправлення", "Дата відправлення", "Час прибуття",
-                  "Дата прибуття", "Станція відправлення", "Станція прибуття", "Місце", "Пасажир", "Ціна"]:
-        context.user_data[step] = text
-        next_steps = ["Рейс", "Час відправлення", "Дата відправлення", "Час прибуття",
-                      "Дата прибуття", "Станція відправлення", "Станція прибуття", "Місце", "Пасажир", "Ціна"]
-        next_index = next_steps.index(step) + 1 if step in next_steps else 0
-        if next_index < len(next_steps):
-            next_step = next_steps[next_index]
-            update.message.reply_text(f"Введіть {next_step}:")
-            context.user_data["step"] = next_step
-        else:
-            update.message.reply_text("Генеруємо PDF...")
-            try:
-                data = context.user_data
-                output_path = f"ticket_{data['Квиток №']}.pdf"
-                generate_ticket(data, "приклад.pdf", output_path)
-                with open(output_path, "rb") as f:
-                    update.message.reply_document(f)
-            except Exception as e:
-                update.message.reply_text(f"❌ Помилка: {e}")
-
-
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok"
-
-
-@app.before_first_request
-def set_webhook():
-    url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
-    bot.set_webhook(url)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+updater.start_polling()
+updater.idle()
