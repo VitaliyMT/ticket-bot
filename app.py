@@ -1,64 +1,57 @@
 import os
-import io
-import logging
-from flask import Flask
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from PyPDF2 import PdfReader, PdfWriter
 import qrcode
+import io
 
-# === Налаштування ===
-TOKEN = os.getenv("BOT_TOKEN")
-PDF_HEIGHT_MM = 297
-TEMPLATE_PATH = "приклад.pdf"
-FONT_REGULAR = "DejaVuSans.ttf"
-FONT_BOLD = "DejaVuSans-Bold.ttf"
-
-pdfmetrics.registerFont(TTFont("DejaVu", FONT_REGULAR))
-pdfmetrics.registerFont(TTFont("DejaVu-Bold", FONT_BOLD))
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
 
-logging.basicConfig(level=logging.INFO)
+PDF_HEIGHT_MM = 297
 
-# === Стани ===
-(
-    STEP_TICKET_NO, STEP_ORDER_NO, STEP_RACE_NO, STEP_RACE_NAME,
-    STEP_DEPARTURE_TIME, STEP_DEPARTURE_DATE,
-    STEP_ARRIVAL_TIME, STEP_ARRIVAL_DATE,
-    STEP_FROM, STEP_TO, STEP_SEAT, STEP_PASSENGER, STEP_PRICE
-) = range(13)
 
-user_data = {}
-
-# === Генерація PDF ===
 def draw_text_left(c, x_mm, y_mm_top_origin, text, size=10.8, bold=False):
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
+    pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
     y_mm = PDF_HEIGHT_MM - y_mm_top_origin
     x_pt = x_mm * mm
     y_pt = y_mm * mm
     font_name = "DejaVu-Bold" if bold else "DejaVu"
+    c.setFillColorRGB(0, 0, 0)
     c.setFont(font_name, size)
     c.drawString(x_pt, y_pt - 1, text)
 
+
 def draw_centered_text(c, x_mm, y_mm_top_origin, text, size=10.8, bold=False):
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
+    pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
     y_mm = PDF_HEIGHT_MM - y_mm_top_origin
     x_pt = x_mm * mm
     y_pt = y_mm * mm
     font_name = "DejaVu-Bold" if bold else "DejaVu"
+    c.setFillColorRGB(0, 0, 0)
     c.setFont(font_name, size)
     text_width = c.stringWidth(text, font_name, size)
     c.drawString(x_pt - text_width / 2, y_pt - 1, text)
 
-def generate_pdf(data):
+
+def generate_ticket(data, template_path, output_path):
     overlay_path = "_overlay_temp.pdf"
     c = canvas.Canvas(overlay_path, pagesize=A4)
 
+    # Очистка шаблонних крапок
     c.setFillColorRGB(1, 1, 1)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
@@ -97,93 +90,74 @@ def generate_pdf(data):
 
     c.save()
 
-    base = PdfReader(TEMPLATE_PATH)
+    base = PdfReader(template_path)
     overlay = PdfReader(overlay_path)
     writer = PdfWriter()
     page = base.pages[0]
     page.merge_page(overlay.pages[0])
-    output = io.BytesIO()
-    writer.write(output)
-    output.seek(0)
-    return output
+    writer.add_page(page)
+    with open(output_path, "wb") as f:
+        writer.write(f)
 
-# === Обробники ===
-def start(update: Update, context: CallbackContext):
+
+# === Telegram Bot Handlers ===
+def start(update, context):
     update.message.reply_text("Введіть номер квитка:")
-    return STEP_TICKET_NO
+    context.user_data["step"] = "ticket_id"
 
-def step_handler(update: Update, context: CallbackContext):
+
+def handle_message(update, context):
+    step = context.user_data.get("step")
     text = update.message.text
-    step = context.user_data.get("step", STEP_TICKET_NO)
-    user_data = context.user_data
 
-    steps = [
-        (STEP_TICKET_NO, "Квиток №", STEP_ORDER_NO, "Введіть номер замовлення:"),
-        (STEP_ORDER_NO, "Номер замовлення", STEP_RACE_NO, "Введіть № рейсу:"),
-        (STEP_RACE_NO, "№ Рейсу", STEP_RACE_NAME, "Введіть найменування рейсу:"),
-        (STEP_RACE_NAME, "Рейс", STEP_DEPARTURE_TIME, "Введіть час відправлення:"),
-        (STEP_DEPARTURE_TIME, "Час відправлення", STEP_DEPARTURE_DATE, "Введіть дату відправлення:"),
-        (STEP_DEPARTURE_DATE, "Дата відправлення", STEP_ARRIVAL_TIME, "Введіть час прибуття:"),
-        (STEP_ARRIVAL_TIME, "Час прибуття", STEP_ARRIVAL_DATE, "Введіть дату прибуття:"),
-        (STEP_ARRIVAL_DATE, "Дата прибуття", STEP_FROM, "Станція відправлення:"),
-        (STEP_FROM, "Станція відправлення", STEP_TO, "Станція прибуття:"),
-        (STEP_TO, "Станція прибуття", STEP_SEAT, "Введіть № місця:"),
-        (STEP_SEAT, "Місце", STEP_PASSENGER, "Введіть ПІБ пасажира:"),
-        (STEP_PASSENGER, "Пасажир", STEP_PRICE, "Введіть ціну:"),
-        (STEP_PRICE, "Ціна", -1, None)
-    ]
+    if step == "ticket_id":
+        context.user_data["Квиток №"] = text
+        update.message.reply_text("Введіть номер замовлення:")
+        context.user_data["step"] = "order_id"
 
-    for s in steps:
-        if step == s[0]:
-            user_data[s[1]] = text
-            if s[2] == -1:
-                try:
-                    pdf = generate_pdf(user_data)
-                    update.message.reply_document(document=pdf, filename="ticket.pdf")
-                    return ConversationHandler.END
-                except Exception as e:
-                    update.message.reply_text("❌ Помилка створення квитка")
-                    return ConversationHandler.END
-            else:
-                update.message.reply_text(s[3])
-                user_data["step"] = s[2]
-                return s[2]
+    elif step == "order_id":
+        context.user_data["Номер замовлення"] = text
+        update.message.reply_text("Введіть № Рейсу:")
+        context.user_data["step"] = "№ Рейсу"
 
-    update.message.reply_text("❌ Невідомий стан")
-    return ConversationHandler.END
+    elif step in ["№ Рейсу", "Рейс", "Час відправлення", "Дата відправлення", "Час прибуття",
+                  "Дата прибуття", "Станція відправлення", "Станція прибуття", "Місце", "Пасажир", "Ціна"]:
+        context.user_data[step] = text
+        next_steps = ["Рейс", "Час відправлення", "Дата відправлення", "Час прибуття",
+                      "Дата прибуття", "Станція відправлення", "Станція прибуття", "Місце", "Пасажир", "Ціна"]
+        next_index = next_steps.index(step) + 1 if step in next_steps else 0
+        if next_index < len(next_steps):
+            next_step = next_steps[next_index]
+            update.message.reply_text(f"Введіть {next_step}:")
+            context.user_data["step"] = next_step
+        else:
+            update.message.reply_text("Генеруємо PDF...")
+            try:
+                data = context.user_data
+                output_path = f"ticket_{data['Квиток №']}.pdf"
+                generate_ticket(data, "приклад.pdf", output_path)
+                with open(output_path, "rb") as f:
+                    update.message.reply_document(f)
+            except Exception as e:
+                update.message.reply_text(f"❌ Помилка: {e}")
 
-# === Flask + Bot ===
-@app.route('/')
-def index():
-    return "Flask is alive"
 
-def run_bot():
-    updater = Updater(TOKEN)
-    dp = updater.dispatcher
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            STEP_TICKET_NO: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_ORDER_NO: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_RACE_NO: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_RACE_NAME: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_DEPARTURE_TIME: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_DEPARTURE_DATE: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_ARRIVAL_TIME: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_ARRIVAL_DATE: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_FROM: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_TO: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_SEAT: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_PASSENGER: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-            STEP_PRICE: [MessageHandler(Filters.text & ~Filters.command, step_handler)],
-        },
-        fallbacks=[]
-    )
-    dp.add_handler(conv)
-    updater.start_polling()
 
-if __name__ == '__main__':
-    import threading
-    threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=10000)
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
+
+
+@app.before_first_request
+def set_webhook():
+    url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
+    bot.set_webhook(url)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
