@@ -147,7 +147,7 @@ def cancel(update: Update, context: CallbackContext):
     return ConversationHandler.END
 
 # --- Запуск ---
-TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН"
+TOKEN = os.getenv("BOT_TOKEN") or "7914757790:AAEr7MUYm0iKzJIE8MSkslrtXnb3-S2zRNU"
 updater = Updater(token=TOKEN, use_context=True)
 dp = updater.dispatcher
 
