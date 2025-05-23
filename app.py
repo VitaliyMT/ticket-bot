@@ -4,8 +4,7 @@ import qrcode
 import tempfile
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters, CallbackContext,
-    ConversationHandler
+    Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
 )
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -18,7 +17,6 @@ from reportlab.lib.utils import ImageReader
 pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
 pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
-# Фази діалогу
 (
     TICKET_NUM, ORDER_NUM, TRIP_NUM, ROUTE, DEPART_TIME, DEPART_DATE,
     ARR_TIME, ARR_DATE, FROM_ST, TO_ST, SEAT, PASSENGER, PRICE
@@ -50,8 +48,8 @@ def ask_price(update, context): return ask_next(update, context, "Пасажир
 
 def generate_and_send(update: Update, context: CallbackContext):
     user_data["Ціна"] = update.message.text.strip()
-    ticket_number = user_data["Квиток №"]
 
+    ticket_number = user_data["Квиток №"]
     template_path = "приклад.pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
@@ -64,10 +62,10 @@ def generate_and_send(update: Update, context: CallbackContext):
 
     os.remove(tmp_path)
 
-    # Кнопка для нового квитка
+    # Кнопка для створення нового квитка
     keyboard = [['🎫 Створити наступний квиток']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    update.message.reply_text("✅ Квиток створено. Натисніть нижче, щоб створити ще один.", reply_markup=reply_markup)
+    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    update.message.reply_text("✅ Квиток створено! Створити новий?", reply_markup=markup)
 
     return ConversationHandler.END
 
@@ -120,7 +118,6 @@ def generate_ticket(data, template_path, output_path):
     qr_y = (PDF_HEIGHT_MM - 54.2) * mm - 15 * mm
     c.drawImage(qr_img, qr_x, qr_y, 30 * mm, 30 * mm)
 
-    # замазуємо 2 крапки в шаблоні
     c.setFillColorRGB(1, 1, 1)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
@@ -137,13 +134,13 @@ def generate_ticket(data, template_path, output_path):
         writer.write(f)
     os.remove(overlay_path)
 
-def handle_next_ticket(update: Update, context: CallbackContext):
-    user_data.clear()
-    return start(update, context)
-
 def cancel(update: Update, context: CallbackContext):
     update.message.reply_text("Скасовано.")
     return ConversationHandler.END
+
+def restart_ticket(update: Update, context: CallbackContext):
+    user_data.clear()
+    return start(update, context)
 
 # --- Запуск бота ---
 TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН"
@@ -151,7 +148,7 @@ updater = Updater(token=TOKEN, use_context=True)
 dp = updater.dispatcher
 
 conv = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
+    entry_points=[CommandHandler("start", start), MessageHandler(Filters.regex("🎫 Створити наступний квиток"), restart_ticket)],
     states={
         TICKET_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_order_num)],
         ORDER_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_trip_num)],
@@ -167,11 +164,9 @@ conv = ConversationHandler(
         PASSENGER: [MessageHandler(Filters.text & ~Filters.command, ask_price)],
         PRICE: [MessageHandler(Filters.text & ~Filters.command, generate_and_send)],
     },
-    fallbacks=[CommandHandler("cancel", cancel)]
+    fallbacks=[CommandHandler("cancel", cancel)],
 )
 
 dp.add_handler(conv)
-dp.add_handler(MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next_ticket))
-
 updater.start_polling()
 updater.idle()
