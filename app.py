@@ -3,10 +3,10 @@ import io
 import qrcode
 import tempfile
 from flask import Flask, request
-from telegram import Update, Bot
+from telegram import Update, ReplyKeyboardMarkup, Bot
 from telegram.ext import (
-    Dispatcher, CommandHandler, MessageHandler,
-    Filters, ConversationHandler, CallbackContext
+    Dispatcher, CommandHandler, MessageHandler, Filters,
+    ConversationHandler, CallbackContext
 )
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -16,31 +16,30 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
-# === Telegram Bot Token ===
-TOKEN = os.getenv("BOT_TOKEN")
-bot = Bot(token=TOKEN)
+# --- Telegram токен ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВ_ТУТ_СВІЙ_ТОКЕН")
 
-# === Flask App ===
+# --- Flask ---
 app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
 
-# === Register Fonts ===
 pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
 pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
-# === Conversation States ===
+# --- Стан ---
 (
     TICKET_NUM, ORDER_NUM, TRIP_NUM, ROUTE, DEPART_TIME, DEPART_DATE,
     ARR_TIME, ARR_DATE, FROM_ST, TO_ST, SEAT, PASSENGER, PRICE
 ) = range(13)
 
-user_data = {}
-
+# --- Діалогові функції ---
 def start(update: Update, context: CallbackContext):
+    context.user_data.clear()
     update.message.reply_text("Введіть номер квитка:")
     return TICKET_NUM
 
-def ask_next(update, context, key, next_state, prompt):
-    user_data[key] = update.message.text.strip()
+def ask_next(update: Update, context: CallbackContext, key, next_state, prompt):
+    context.user_data[key] = update.message.text.strip()
     update.message.reply_text(prompt)
     return next_state
 
@@ -57,129 +56,4 @@ def ask_seat(update, context): return ask_next(update, context, "Станція 
 def ask_passenger(update, context): return ask_next(update, context, "Місце", PASSENGER, "Введіть ім’я пасажира:")
 def ask_price(update, context): return ask_next(update, context, "Пасажир", PRICE, "Введіть ціну квитка:")
 
-def generate_and_send(update: Update, context: CallbackContext):
-    user_data["Ціна"] = update.message.text.strip()
-    ticket_number = user_data["Квиток №"]
-    template_path = "приклад.pdf"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp_path = tmp.name
-    tmp.close()
-
-    generate_ticket(user_data, template_path, tmp_path)
-
-    with open(tmp_path, "rb") as f:
-        update.message.reply_document(f, filename=f"ticket_{ticket_number}.pdf")
-
-    os.remove(tmp_path)
-    user_data.clear()
-    update.message.reply_text("✅ Квиток створено! Щоб створити новий — натисніть /start")
-    return ConversationHandler.END
-
-def generate_ticket(data, template_path, output_path):
-    PDF_HEIGHT_MM = 297
-    overlay_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-    c = canvas.Canvas(overlay_path, pagesize=A4)
-
-    def draw_centered_text(x_mm, y_mm, text, bold=False):
-        y_pt = (PDF_HEIGHT_MM - y_mm) * mm
-        x_pt = x_mm * mm
-        font = "DejaVu-Bold" if bold else "DejaVu"
-        c.setFont(font, 10.8)
-        width = c.stringWidth(text, font, 10.8)
-        c.drawString(x_pt - width / 2, y_pt - 1, text)
-
-    def draw_left_text(x_mm, y_mm, text, bold=False):
-        y_pt = (PDF_HEIGHT_MM - y_mm) * mm
-        x_pt = x_mm * mm
-        font = "DejaVu-Bold" if bold else "DejaVu"
-        c.setFont(font, 10.8)
-        c.drawString(x_pt, y_pt - 1, text)
-
-    coords = {
-        "№ Рейсу": (53.75, 50.81, True),
-        "Рейс": (82.31, 49.29, True),
-        "Станція відправлення": (90.56, 62.67, True),
-        "Станція прибуття": (89.50, 72.83, True),
-        "Час відправлення": (156.58, 49.97, True),
-        "Дата відправлення": (157.22, 55.89, False),
-        "Час прибуття": (186.63, 49.75, True),
-        "Дата прибуття": (186.42, 55.47, False),
-        "Ціна": (177.32, 88.52, True),
-        "Місце": (97.55, 86.38, True),
-    }
-
-    for key, (x, y, bold) in coords.items():
-        draw_centered_text(x, y, data[key], bold=bold)
-
-    draw_left_text(13.25, 86.8, data["Пасажир"], bold=True)
-    draw_left_text(59.70, 13.66, data["Номер замовлення"], bold=True)
-    draw_left_text(105.70, 38.83, data["Квиток №"], bold=True)
-
-    qr = qrcode.make(data["Квиток №"])
-    buf = io.BytesIO()
-    qr.save(buf)
-    buf.seek(0)
-    qr_img = ImageReader(buf)
-    qr_x = 27.72 * mm - 15 * mm
-    qr_y = (PDF_HEIGHT_MM - 54.2) * mm - 15 * mm
-    c.drawImage(qr_img, qr_x, qr_y, 30 * mm, 30 * mm)
-
-    # замазуємо дві крапки
-    c.setFillColorRGB(1, 1, 1)
-    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
-    c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
-
-    c.save()
-
-    base = PdfReader(template_path)
-    overlay = PdfReader(overlay_path)
-    writer = PdfWriter()
-    page = base.pages[0]
-    page.merge_page(overlay.pages[0])
-    writer.add_page(page)
-    with open(output_path, "wb") as f:
-        writer.write(f)
-
-    os.remove(overlay_path)
-
-# === Telegram Dispatcher setup ===
-from telegram.ext import Dispatcher
-dispatcher = Dispatcher(bot=bot, update_queue=None, workers=4, use_context=True)
-
-conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    states={
-        TICKET_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_order_num)],
-        ORDER_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_trip_num)],
-        TRIP_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_route)],
-        ROUTE: [MessageHandler(Filters.text & ~Filters.command, ask_depart_time)],
-        DEPART_TIME: [MessageHandler(Filters.text & ~Filters.command, ask_depart_date)],
-        DEPART_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_arr_time)],
-        ARR_TIME: [MessageHandler(Filters.text & ~Filters.command, ask_arr_date)],
-        ARR_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_from_st)],
-        FROM_ST: [MessageHandler(Filters.text & ~Filters.command, ask_to_st)],
-        TO_ST: [MessageHandler(Filters.text & ~Filters.command, ask_seat)],
-        SEAT: [MessageHandler(Filters.text & ~Filters.command, ask_passenger)],
-        PASSENGER: [MessageHandler(Filters.text & ~Filters.command, ask_price)],
-        PRICE: [MessageHandler(Filters.text & ~Filters.command, generate_and_send)],
-    },
-    fallbacks=[]
-)
-
-dispatcher.add_handler(conv_handler)
-
-# === Webhook Route ===
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return 'ok'
-
-# === Health check ===
-@app.route('/')
-def index():
-    return 'Flask is alive'
-
-# === Run Flask (для локального тесту) ===
-if __name__ == '__main__':
-    app.run(debug=False, port=10000)
+def generate
