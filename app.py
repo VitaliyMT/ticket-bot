@@ -4,12 +4,8 @@ import qrcode
 import tempfile
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext,
-    ConversationHandler
+    Updater, CommandHandler, MessageHandler, Filters,
+    CallbackContext, ConversationHandler
 )
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -19,21 +15,19 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
-# Шрифти
 pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
 pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
-# Стан розмови
 (
     TICKET_NUM, ORDER_NUM, TRIP_NUM, ROUTE, DEPART_TIME, DEPART_DATE,
     ARR_TIME, ARR_DATE, FROM_ST, TO_ST, SEAT, PASSENGER, PRICE
 ) = range(13)
 
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("🎫 Введіть номер квитка:")
+    update.message.reply_text("Введіть номер квитка:")
     return TICKET_NUM
 
-def ask_next(update: Update, context: CallbackContext, key, next_state, prompt):
+def ask_next(update, context, key, next_state, prompt):
     context.user_data[key] = update.message.text.strip()
     update.message.reply_text(prompt)
     return next_state
@@ -53,23 +47,32 @@ def ask_price(update, context): return ask_next(update, context, "Пасажир
 
 def generate_and_send(update: Update, context: CallbackContext):
     context.user_data["Ціна"] = update.message.text.strip()
-    data = context.user_data
-    ticket_number = data["Квиток №"]
+
+    ticket_number = context.user_data["Квиток №"]
     template_path = "приклад.pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
     tmp.close()
 
-    generate_ticket(data, template_path, tmp_path)
+    generate_ticket(context.user_data, template_path, tmp_path)
 
     with open(tmp_path, "rb") as f:
         update.message.reply_document(f, filename=f"ticket_{ticket_number}.pdf")
 
     os.remove(tmp_path)
 
-    # Кнопка: створити ще один квиток
-    keyboard = [["🎫 Створити наступний квиток"]]
-    update.message.reply_text("✅ Квиток створено! Створити новий?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    keyboard = [['🎫 Створити наступний квиток']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    update.message.reply_text("✅ Квиток створено! Створити новий?", reply_markup=reply_markup)
+
+    return ConversationHandler.END
+
+def handle_next_ticket(update: Update, context: CallbackContext):
+    context.user_data.clear()
+    return start(update, context)
+
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("Скасовано.")
     return ConversationHandler.END
 
 def generate_ticket(data, template_path, output_path):
@@ -137,20 +140,20 @@ def generate_ticket(data, template_path, output_path):
         writer.write(f)
     os.remove(overlay_path)
 
-def handle_next_ticket(update: Update, context: CallbackContext):
-    context.user_data.clear()
-    return start(update, context)
+# Запуск
+if __name__ == "__main__":
+    from flask import Flask, request
 
-def cancel(update: Update, context: CallbackContext):
-    update.message.reply_text("❌ Операцію скасовано.")
-    return ConversationHandler.END
+    app = Flask(__name__)
+    TOKEN = os.getenv("BOT_TOKEN", "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН")
 
-def main():
-    TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН"
-    updater = Updater(token=TOKEN, use_context=True)
-    dp = updater.dispatcher
+    from telegram.ext import Dispatcher, Defaults
+    from telegram import Bot
 
-    conv = ConversationHandler(
+    bot = Bot(token=TOKEN)
+    dispatcher = Dispatcher(bot, None, use_context=True)
+
+    conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             TICKET_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_order_num)],
@@ -170,11 +173,17 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    dp.add_handler(conv)
-    dp.add_handler(MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next_ticket))
+    dispatcher.add_handler(conv_handler)
+    dispatcher.add_handler(MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next_ticket))
 
-    updater.start_polling()
-    updater.idle()
+    @app.route(f"/{TOKEN}", methods=["POST"])
+    def webhook():
+        update = Update.de_json(request.get_json(force=True), bot)
+        dispatcher.process_update(update)
+        return "OK"
 
-if __name__ == "__main__":
-    main()
+    @app.route("/")
+    def index():
+        return "Flask is alive"
+
+    app.run(host="0.0.0.0", port=10000)
