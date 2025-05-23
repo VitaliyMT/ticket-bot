@@ -2,8 +2,11 @@ import os
 import io
 import qrcode
 import tempfile
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    Updater, CommandHandler, MessageHandler, Filters, CallbackContext,
+    ConversationHandler
+)
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -47,8 +50,8 @@ def ask_price(update, context): return ask_next(update, context, "Пасажир
 
 def generate_and_send(update: Update, context: CallbackContext):
     user_data["Ціна"] = update.message.text.strip()
-
     ticket_number = user_data["Квиток №"]
+
     template_path = "приклад.pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
@@ -60,6 +63,12 @@ def generate_and_send(update: Update, context: CallbackContext):
         update.message.reply_document(f, filename=f"ticket_{ticket_number}.pdf")
 
     os.remove(tmp_path)
+
+    # Кнопка для нового квитка
+    keyboard = [['🎫 Створити наступний квиток']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    update.message.reply_text("✅ Квиток створено. Натисніть нижче, щоб створити ще один.", reply_markup=reply_markup)
+
     return ConversationHandler.END
 
 def generate_ticket(data, template_path, output_path):
@@ -128,6 +137,10 @@ def generate_ticket(data, template_path, output_path):
         writer.write(f)
     os.remove(overlay_path)
 
+def handle_next_ticket(update: Update, context: CallbackContext):
+    user_data.clear()
+    return start(update, context)
+
 def cancel(update: Update, context: CallbackContext):
     update.message.reply_text("Скасовано.")
     return ConversationHandler.END
@@ -158,6 +171,7 @@ conv = ConversationHandler(
 )
 
 dp.add_handler(conv)
+dp.add_handler(MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next_ticket))
 
 updater.start_polling()
 updater.idle()
