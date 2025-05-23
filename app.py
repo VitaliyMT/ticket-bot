@@ -2,9 +2,11 @@ import os
 import io
 import qrcode
 import tempfile
-from telegram import Update, ReplyKeyboardMarkup
+from flask import Flask, request
+from telegram import Update, ReplyKeyboardMarkup, Bot
 from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+    Dispatcher, CommandHandler, MessageHandler, Filters,
+    ConversationHandler, CallbackContext
 )
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -14,21 +16,33 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
+# --- Telegram Token ---
+TOKEN = os.getenv("BOT_TOKEN", "ВСТАВ_ТУТ_СВІЙ_ТОКЕН")
+bot = Bot(token=TOKEN)
+
+# --- Flask ---
+app = Flask(__name__)
+
+# --- PDF Шрифти ---
 pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
 pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
-# Стан введення
+# --- Етапи діалогу ---
 (
     TICKET_NUM, ORDER_NUM, TRIP_NUM, ROUTE, DEPART_TIME, DEPART_DATE,
     ARR_TIME, ARR_DATE, FROM_ST, TO_ST, SEAT, PASSENGER, PRICE
 ) = range(13)
 
+# --- Dispatcher ---
+dispatcher = Dispatcher(bot, None, workers=1, use_context=True)
 user_data = {}
 
+# --- Початок ---
 def start(update: Update, context: CallbackContext):
     update.message.reply_text("Введіть номер квитка:")
     return TICKET_NUM
 
+# --- Наступні етапи ---
 def ask_next(update: Update, context: CallbackContext, key, next_state, prompt):
     user_data[key] = update.message.text.strip()
     update.message.reply_text(prompt)
@@ -47,10 +61,11 @@ def ask_seat(update, context): return ask_next(update, context, "Станція 
 def ask_passenger(update, context): return ask_next(update, context, "Місце", PASSENGER, "Введіть ім’я пасажира:")
 def ask_price(update, context): return ask_next(update, context, "Пасажир", PRICE, "Введіть ціну квитка:")
 
+# --- Генерація квитка ---
 def generate_and_send(update: Update, context: CallbackContext):
     user_data["Ціна"] = update.message.text.strip()
-
     ticket_number = user_data["Квиток №"]
+
     template_path = "приклад.pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
@@ -63,19 +78,13 @@ def generate_and_send(update: Update, context: CallbackContext):
 
     os.remove(tmp_path)
 
-    # Після PDF – кнопка "Створити наступний квиток"
+    # Кнопка створення нового
     keyboard = [['🎫 Створити наступний квиток']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    update.message.reply_text("✅ Квиток створено! Створити новий?", reply_markup=reply_markup)
+    update.message.reply_text("✅ Квиток створено! Створити новий?", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
 
     return ConversationHandler.END
 
-def handle_next_ticket(update: Update, context: CallbackContext) -> int:
-    context.user_data.clear()
-    user_data.clear()
-    update.message.reply_text("Введіть номер квитка:")
-    return TICKET_NUM
-
+# --- PDF генератор ---
 def generate_ticket(data, template_path, output_path):
     PDF_HEIGHT_MM = 297
     overlay_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
@@ -110,7 +119,7 @@ def generate_ticket(data, template_path, output_path):
     }
 
     for key, (x, y, bold) in coords.items():
-        draw_centered_text(x, y, data[key], bold=bold)
+        draw_centered_text(x, y, data[key], bold)
 
     draw_left_text(13.25, 86.8, data["Пасажир"], bold=True)
     draw_left_text(59.70, 13.66, data["Номер замовлення"], bold=True)
@@ -125,7 +134,6 @@ def generate_ticket(data, template_path, output_path):
     qr_y = (PDF_HEIGHT_MM - 54.2) * mm - 15 * mm
     c.drawImage(qr_img, qr_x, qr_y, 30 * mm, 30 * mm)
 
-    # замазати 2 крапки
     c.setFillColorRGB(1, 1, 1)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 49.63) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
     c.rect(156.79 * mm - 1.5 * mm, (PDF_HEIGHT_MM - 50.94) * mm - 1.5 * mm, 3 * mm, 3 * mm, fill=True, stroke=False)
@@ -140,24 +148,23 @@ def generate_ticket(data, template_path, output_path):
     writer.add_page(page)
     with open(output_path, "wb") as f:
         writer.write(f)
+
     os.remove(overlay_path)
 
+# --- Повторне створення ---
+def handle_next(update: Update, context: CallbackContext):
+    user_data.clear()
+    return start(update, context)
+
 def cancel(update: Update, context: CallbackContext):
-    update.message.reply_text("Скасовано.")
+    update.message.reply_text("❌ Скасовано.")
     return ConversationHandler.END
 
-# --- Запуск ---
-TOKEN = os.getenv("BOT_TOKEN") or "ТОКЕН БОТА"
-updater = Updater(token=TOKEN, use_context=True)
-dp = updater.dispatcher
-
-conv = ConversationHandler(
+# --- Обробники ---
+conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
-        TICKET_NUM: [
-            MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next_ticket),
-            MessageHandler(Filters.text & ~Filters.command, ask_order_num)
-        ],
+        TICKET_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_order_num)],
         ORDER_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_trip_num)],
         TRIP_NUM: [MessageHandler(Filters.text & ~Filters.command, ask_route)],
         ROUTE: [MessageHandler(Filters.text & ~Filters.command, ask_depart_time)],
@@ -171,10 +178,22 @@ conv = ConversationHandler(
         PASSENGER: [MessageHandler(Filters.text & ~Filters.command, ask_price)],
         PRICE: [MessageHandler(Filters.text & ~Filters.command, generate_and_send)],
     },
-    fallbacks=[CommandHandler("cancel", cancel)],
+    fallbacks=[CommandHandler("cancel", cancel)]
 )
 
-dp.add_handler(conv)
+dispatcher.add_handler(conv_handler)
+dispatcher.add_handler(MessageHandler(Filters.text("🎫 Створити наступний квиток"), handle_next))
 
-updater.start_polling()
-updater.idle()
+# --- Webhook ---
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Flask is alive"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
